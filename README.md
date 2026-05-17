@@ -23,7 +23,7 @@
 
 ## 📖 Overview
 
-[Based on Image-GS Algorithm: (https://github.com/NYU-ICL/image-gs;https://arxiv.org/abs/2407.01866)]**Gaussian Preprocessor** prepends a differentiable 2D Gaussian rendering pipeline to the [YOLO-World](https://docs.ultralytics.com/models/yolo-world/) object detector. Instead of feeding raw pixels into the backbone, input images are encoded into a sparse set of *N* 2D Gaussians that cluster around semantically important regions. These Gaussians are rendered back into a 2D tensor and passed to YOLO-World. The entire pipeline is trained **end-to-end** — YOLO's detection loss backpropagates through the renderer, teaching the saliency network and parameter heads to "draw" images that maximize detection accuracy.
+[Based on Image-GS Algorithm: (https://github.com/NYU-ICL/image-gs);(https://arxiv.org/abs/2407.01866)]**Gaussian Preprocessor** prepends a differentiable 2D Gaussian rendering pipeline to the [YOLO-World](https://docs.ultralytics.com/models/yolo-world/) object detector. Instead of feeding raw pixels into the backbone, input images are encoded into a sparse set of *N* 2D Gaussians that cluster around semantically important regions. These Gaussians are rendered back into a 2D tensor and passed to YOLO-World. The entire pipeline is trained **end-to-end** — YOLO's detection loss backpropagates through the renderer, teaching the saliency network and parameter heads to "draw" images that maximize detection accuracy.
 
 ### Key Highlights
 
