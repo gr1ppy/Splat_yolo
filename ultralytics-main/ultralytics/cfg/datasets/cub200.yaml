@@ -1,0 +1,222 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# CUB-200-2011 (Caltech-UCSD Birds-200-2011) — Fine-Grained Detection
+# Paper: "The Caltech-UCSD Birds-200-2011 Dataset" (Wah et al., 2011)
+# Homepage: https://www.vision.caltech.edu/datasets/cub_200_2011/
+# Kaggle:   https://www.kaggle.com/datasets/wenewone/cub2002011
+#
+# 200 bird species, 11,788 images with bounding box annotations.
+# The download script converts the native CUB format to YOLO-format
+# labels and creates symlink-based train/val split directories.
+#
+# Expected layout after download:
+#   datasets/
+#   └── cub200/
+#       ├── CUB_200_2011/          ← raw dataset (images/, bounding_boxes.txt, etc.)
+#       ├── images/
+#       │   ├── train/             ← symlinks to CUB images (train split)
+#       │   └── val/               ← symlinks to CUB images (test split)
+#       ├── labels/
+#       │   ├── train/             ← YOLO .txt labels
+#       │   └── val/               ← YOLO .txt labels
+#       └── names.json             ← 200 bird species names
+#
+# Statistics:
+#   Train: ~5,994 images
+#   Val:   ~5,794 images
+#   Classes: 200 bird species
+
+path: cub200  # dataset root dir
+train: images/train
+val: images/val
+
+# Placeholder — overridden by names.json at runtime
+names:
+  0: bird
+
+download: |
+  import json, os
+  from pathlib import Path
+
+  import numpy as np
+
+  from ultralytics.utils import LOGGER, TQDM
+  from ultralytics.utils.downloads import safe_download
+
+  dir = Path(yaml["path"])  # dataset root
+
+  # ── Step 1: Download from Kaggle ────────────────────────────────────
+  # The dataset is available as a zip from Kaggle.
+  # We use the Kaggle API if available, otherwise fall back to manual.
+  zip_path = dir / "cub2002011.zip"
+  cub_dir = dir / "CUB_200_2011"
+
+  if not cub_dir.exists():
+      try:
+          # Try Kaggle API first
+          LOGGER.info("Downloading CUB-200-2011 via Kaggle API ...")
+          import subprocess
+          subprocess.run(
+              ["pip", "install", "-q", "kaggle"],
+              check=False, capture_output=True,
+          )
+          subprocess.run(
+              ["kaggle", "datasets", "download", "-d", "wenewone/cub2002011",
+               "-p", str(dir), "--unzip"],
+              check=True,
+          )
+          LOGGER.info("Kaggle download complete ✓")
+      except Exception as e:
+          LOGGER.warning(f"Kaggle API failed ({e}), trying direct URL ...")
+          # Fallback: direct download from the original source
+          url = "https://data.caltech.edu/records/65de6-vp158/files/CUB_200_2011.tgz"
+          safe_download(url=url, dir=dir, delete=False)
+          # Extract .tgz
+          import tarfile
+          tgz = dir / "CUB_200_2011.tgz"
+          if tgz.exists():
+              LOGGER.info(f"Extracting {tgz} ...")
+              with tarfile.open(tgz, "r:gz") as tar:
+                  tar.extractall(path=dir)
+              LOGGER.info("Extraction complete ✓")
+
+  # Locate the CUB root (handles both zip layouts)
+  if not cub_dir.exists():
+      # Some zips nest inside another folder
+      candidates = list(dir.glob("**/CUB_200_2011"))
+      if candidates:
+          cub_dir = candidates[0]
+      else:
+          raise FileNotFoundError(
+              f"CUB_200_2011 directory not found in {dir}. "
+              "Please download manually from Kaggle."
+          )
+
+  # ── Step 2: Parse CUB annotation files ─────────────────────────────
+  LOGGER.info("Parsing CUB-200-2011 annotations ...")
+
+  # images.txt: <image_id> <relative_path>
+  img_id_to_path = {}
+  with open(cub_dir / "images.txt", encoding="utf-8") as f:
+      for line in f:
+          parts = line.strip().split(" ", 1)
+          img_id_to_path[int(parts[0])] = parts[1]
+
+  # bounding_boxes.txt: <image_id> <x> <y> <width> <height>
+  img_id_to_bbox = {}
+  with open(cub_dir / "bounding_boxes.txt", encoding="utf-8") as f:
+      for line in f:
+          parts = line.strip().split()
+          img_id_to_bbox[int(parts[0])] = [float(x) for x in parts[1:]]
+
+  # image_class_labels.txt: <image_id> <class_id>
+  img_id_to_class = {}
+  with open(cub_dir / "image_class_labels.txt", encoding="utf-8") as f:
+      for line in f:
+          parts = line.strip().split()
+          img_id_to_class[int(parts[0])] = int(parts[1])
+
+  # classes.txt: <class_id> <class_name>
+  class_id_to_name = {}
+  with open(cub_dir / "classes.txt", encoding="utf-8") as f:
+      for line in f:
+          parts = line.strip().split(" ", 1)
+          cid = int(parts[0])
+          # e.g. "001.Black_footed_Albatross" → "Black footed Albatross"
+          raw_name = parts[1]
+          # Remove numeric prefix like "001."
+          if "." in raw_name:
+              raw_name = raw_name.split(".", 1)[1]
+          clean_name = raw_name.replace("_", " ").strip()
+          class_id_to_name[cid] = clean_name
+
+  # train_test_split.txt: <image_id> <is_training_image>
+  img_id_to_is_train = {}
+  with open(cub_dir / "train_test_split.txt", encoding="utf-8") as f:
+      for line in f:
+          parts = line.strip().split()
+          img_id_to_is_train[int(parts[0])] = int(parts[1]) == 1
+
+  # Build 0-indexed class mapping (CUB classes are 1-indexed)
+  sorted_cids = sorted(class_id_to_name.keys())
+  cid_to_idx = {cid: idx for idx, cid in enumerate(sorted_cids)}
+  names = {idx: class_id_to_name[cid] for cid, idx in cid_to_idx.items()}
+
+  LOGGER.info(f"  {len(img_id_to_path)} images, {len(names)} classes")
+
+  # ── Step 3: Write YOLO labels + create image symlinks ──────────────
+  from PIL import Image as PILImage
+
+  for split_name in ["train", "val"]:
+      (dir / "images" / split_name).mkdir(parents=True, exist_ok=True)
+      (dir / "labels" / split_name).mkdir(parents=True, exist_ok=True)
+
+  n_train = n_val = 0
+  for img_id, rel_path in TQDM(img_id_to_path.items(), desc="Converting CUB → YOLO"):
+      is_train = img_id_to_is_train.get(img_id, True)
+      split = "train" if is_train else "val"
+
+      # Source image path
+      src_img = cub_dir / "images" / rel_path
+      if not src_img.exists():
+          continue
+
+      # Get image dimensions for normalization
+      try:
+          with PILImage.open(src_img) as im:
+              w, h = im.size
+      except Exception:
+          continue
+
+      # Bounding box: [x_tl, y_tl, box_w, box_h] → YOLO [cx, cy, w, h] normalized
+      bbox = img_id_to_bbox.get(img_id)
+      cls_id = img_id_to_class.get(img_id)
+      if bbox is None or cls_id is None:
+          continue
+
+      cls_idx = cid_to_idx[cls_id]
+      x_tl, y_tl, bw, bh = bbox
+
+      # Clamp to image bounds
+      x_tl = max(0, x_tl)
+      y_tl = max(0, y_tl)
+      bw = min(bw, w - x_tl)
+      bh = min(bh, h - y_tl)
+      if bw <= 0 or bh <= 0:
+          continue
+
+      cx = (x_tl + bw / 2) / w
+      cy = (y_tl + bh / 2) / h
+      nw = bw / w
+      nh = bh / h
+
+      # Filename stem (flatten nested path)
+      stem = Path(rel_path).stem
+
+      # Create image symlink
+      link = dir / "images" / split / f"{stem}.jpg"
+      if not link.exists():
+          os.symlink(str(src_img.resolve()), str(link))
+
+      # Write YOLO label
+      lbl = dir / "labels" / split / f"{stem}.txt"
+      with open(lbl, "w", encoding="utf-8") as f:
+          f.write(f"{cls_idx} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}\n")
+
+      if is_train:
+          n_train += 1
+      else:
+          n_val += 1
+
+  LOGGER.info(f"  → {n_train} train + {n_val} val label files written")
+
+  # ── Step 4: Save names.json ────────────────────────────────────────
+  names_file = dir / "names.json"
+  with open(names_file, "w", encoding="utf-8") as f:
+      json.dump({str(k): v for k, v in names.items()}, f, indent=2)
+  LOGGER.info(f"Saved {len(names)} species names to {names_file}")
+
+  # ── Step 5: Update yaml dict ───────────────────────────────────────
+  yaml["names"] = names
+  yaml["nc"] = len(names)
+  LOGGER.info(f"CUB-200-2011: {len(names)} bird species loaded")

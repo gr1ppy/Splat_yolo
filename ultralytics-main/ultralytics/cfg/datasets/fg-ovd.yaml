@@ -1,0 +1,195 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# FG-OVD (Fine-Grained Open-Vocabulary Detection) dataset
+# Paper: "The devil is in the fine-grained details" (CVPR 2024 Highlight)
+# Repository: https://github.com/lorebianchi98/FG-OVD
+#
+# FG-OVD annotations reference COCO 2017 images.  IMPORTANTLY, the
+# *validation* set uses images from COCO *train2017* (not val2017).
+# To avoid label-directory collisions between splits, the download
+# script creates per-split symlink directories:
+#     images/train_fg/  (symlinks → images/train2017/…)
+#     images/val_fg/    (symlinks → images/train2017/… or val2017/…)
+# with matching label directories:
+#     labels/train_fg/
+#     labels/val_fg/
+#
+# This ensures Ultralytics' images→labels path convention works correctly
+# and train/val labels never collide.
+
+path: fg-ovd  # dataset root dir (relative to ultralytics datasets dir)
+
+# Symlink-based split dirs created by the download script
+train: images/train_fg
+val: images/val_fg
+
+# Placeholder names — overridden at runtime by names.json
+names:
+  0: object
+
+# Download + convert script
+download: |
+  import json, os
+  from collections import defaultdict
+  from pathlib import Path
+
+  import numpy as np
+
+  from ultralytics.utils import LOGGER, TQDM
+  from ultralytics.utils.downloads import download
+
+  dir = Path(yaml["path"])  # dataset root dir
+
+  # ── Step 1: Download COCO 2017 images ──────────────────────────────
+  urls = [
+      "http://images.cocodataset.org/zips/train2017.zip",  # 19G, 118k images
+      "http://images.cocodataset.org/zips/val2017.zip",    # 1G, 5k images
+  ]
+  download(urls, dir=dir / "images", threads=2)
+
+  # ── Step 2: Download FG-OVD annotations from GitHub ────────────────
+  base_url = "https://raw.githubusercontent.com/lorebianchi98/FG-OVD/main"
+  splits_list = [
+      "1_attributes.json",
+      "2_attributes.json",
+      "3_attributes.json",
+      "shuffle_negatives.json",
+      "color.json",
+      "material.json",
+      "pattern.json",
+      "transparency.json",
+  ]
+  for folder in ["benchmarks", "training_sets", "validation_sets"]:
+      ann_dir = dir / "annotations" / folder
+      ann_dir.mkdir(parents=True, exist_ok=True)
+      urls = [f"{base_url}/{folder}/{s}" for s in splits_list]
+      download(urls, dir=ann_dir, threads=4)
+
+  # ── Step 3: Convert LVIS-format JSON → YOLO labels ────────────────
+  train_json = dir / "annotations" / "training_sets" / "1_attributes.json"
+  val_json   = dir / "annotations" / "validation_sets" / "1_attributes.json"
+
+  def convert_fgovd_to_yolo(json_path, out_dir, img_root, split_name):
+      """Convert a single FG-OVD JSON to YOLO labels with symlink-based dirs.
+
+      Creates:
+        labels/{split_name}/{stem}.txt  — YOLO-format label file
+        images/{split_name}/{stem}.jpg  — symlink to actual COCO image
+
+      This ensures Ultralytics' images→labels path substitution works
+      correctly, and train/val labels never collide even when both
+      reference the same underlying COCO images.
+      """
+      LOGGER.info(f"Loading {json_path} ...")
+      with open(json_path, encoding="utf-8") as f:
+          data = json.load(f)
+
+      # Build category mapping: original id → 0-indexed sequential
+      categories = sorted(data["categories"], key=lambda c: c["id"])
+      cat_id_to_idx = {}
+      names = {}
+      for idx, cat in enumerate(categories):
+          cat_id_to_idx[cat["id"]] = idx
+          # Strip whitespace to avoid mismatch with CLIP text embeddings
+          # (category_names property strips, RandomLoadText uses raw text)
+          names[idx] = cat["name"].strip()
+
+      # Build image dict
+      images = {img["id"]: img for img in data["images"]}
+
+      # Group annotations by image_id
+      img_anns = defaultdict(list)
+      for ann in data["annotations"]:
+          img_anns[ann["image_id"]].append(ann)
+
+      # Prepare split-specific output dirs
+      label_dir = out_dir / "labels" / split_name
+      image_link_dir = out_dir / "images" / split_name
+      label_dir.mkdir(parents=True, exist_ok=True)
+      image_link_dir.mkdir(parents=True, exist_ok=True)
+
+      n_written = 0
+      for img_id, anns in TQDM(img_anns.items(), desc=f"Converting {split_name}"):
+          if img_id not in images:
+              continue
+          img = images[img_id]
+          h, w = img["height"], img["width"]
+
+          # Derive relative image path from coco_url
+          coco_url = img.get("coco_url", "")
+          if coco_url:
+              rel_path = coco_url.split("cocodataset.org/")[-1]
+          else:
+              rel_path = img.get("file_name", f"{img_id:012d}.jpg")
+
+          # Check actual COCO image exists
+          img_file = img_root / "images" / rel_path
+          if not img_file.exists():
+              continue
+
+          fname = Path(rel_path).name          # "000000123456.jpg"
+          stem  = Path(rel_path).stem           # "000000123456"
+          coco_split = Path(rel_path).parent.name  # "train2017" or "val2017"
+
+          # Create image symlink:  images/train_fg/X.jpg → ../train2017/X.jpg
+          link_path = image_link_dir / fname
+          if not link_path.exists():
+              os.symlink(f"../{coco_split}/{fname}", str(link_path))
+
+          # Build label lines
+          lines = []
+          for ann in anns:
+              if ann.get("iscrowd", False):
+                  continue
+              cat_id = ann["category_id"]
+              if cat_id not in cat_id_to_idx:
+                  continue
+
+              cls_idx = cat_id_to_idx[cat_id]
+              box = np.array(ann["bbox"], dtype=np.float64)  # [x, y, w, h]
+              if box[2] <= 0 or box[3] <= 0:
+                  continue
+
+              # Convert [x,y,w,h] top-left → [cx,cy,w,h] center, normalized
+              box[0] = (box[0] + box[2] / 2) / w
+              box[1] = (box[1] + box[3] / 2) / h
+              box[2] /= w
+              box[3] /= h
+
+              lines.append(f"{cls_idx} {box[0]:.6f} {box[1]:.6f} {box[2]:.6f} {box[3]:.6f}\n")
+
+          if lines:
+              lbl_file = label_dir / f"{stem}.txt"
+              with open(lbl_file, "w", encoding="utf-8") as f:
+                  f.writelines(lines)
+              n_written += 1
+
+      LOGGER.info(f"  → {n_written} label files + {n_written} image symlinks")
+      return cat_id_to_idx, names
+
+  # Convert both splits
+  LOGGER.info("Converting FG-OVD training annotations ...")
+  _, train_names = convert_fgovd_to_yolo(train_json, dir, dir, "train_fg")
+
+  LOGGER.info("Converting FG-OVD validation annotations ...")
+  _, val_names = convert_fgovd_to_yolo(val_json, dir, dir, "val_fg")
+
+  # Merge names (training set is the superset)
+  all_names = dict(train_names)
+  next_idx = max(all_names.keys()) + 1 if all_names else 0
+  for idx, name in val_names.items():
+      if name not in all_names.values():
+          all_names[next_idx] = name
+          next_idx += 1
+
+  # ── Step 4: Save names.json for persistent loading ─────────────────
+  names_file = dir / "names.json"
+  names_ser = {str(k): v for k, v in all_names.items()}
+  with open(names_file, "w", encoding="utf-8") as f:
+      json.dump(names_ser, f)
+  LOGGER.info(f"Saved {len(all_names)} category names to {names_file}")
+
+  # ── Step 5: Dynamically update yaml dict ───────────────────────────
+  yaml["names"] = all_names
+  yaml["nc"] = len(all_names)
+  LOGGER.info(f"FG-OVD: {len(all_names)} categories loaded")
